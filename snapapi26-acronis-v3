@@ -1,0 +1,76 @@
+#!/bin/bash
+
+# Exit immediately if a simple command fails
+set -e
+
+# 1. Root Check
+if [ "$EUID" -ne 0 ]; then
+    echo "Error: You need to run this script as root or with sudo."
+    exit 1
+fi
+
+# 2. Extract Version & Active Kernel
+echo "finding..."
+snapapi26=$(dkms status | grep snapapi | head -n 1 | awk -F'/' '{print $2}' | awk -F',' '{print $1}' | tr -d ' ')
+kernel=$(uname -r)
+
+# If nothing found in DKMS, automatically grab the latest source from /usr/src and add it
+if [ -z "$snapapi26" ]; then
+    echo "DKMS status showed nothing. Searching /usr/src for snapapi26 sources..."
+    LATEST_DIR=$(ls -d /usr/src/snapapi26-* 2>/dev/null | sort -V | tail -n 1)
+
+    if [ -z "$LATEST_DIR" ]; then
+        echo "Error: Could not find any snapapi26 source directories in /usr/src!"
+        exit 1
+    fi
+
+    snapapi26=$(basename "$LATEST_DIR" | sed 's/snapapi26-//')
+    echo "Found source version $snapapi26 in /usr/src. Registering with DKMS..."
+
+    dkms add -m snapapi26 -v "$snapapi26"
+fi
+
+# 3. Smart Skip Check
+if dkms status | grep -q "snapapi26.*$kernel.*installed"; then
+    echo "SnapAPI ($snapapi26) is already installed and running fine on kernel $kernel."
+    read -p "    Do you still want to force a reinstall anyway? (y/n): " confirm </dev/tty
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        echo "Cancelled. Leaving everything as-is."
+        exit 0
+    fi
+fi
+
+echo "Found SnapAPI version: $snapapi26"
+echo "Rebuilding driver for your active kernel ($kernel)..."
+
+# 4. Kernel Headers Check & Auto-Install (Prevents the previous failure)
+if [ ! -d "/lib/modules/$kernel/build" ] && [ ! -d "/lib/modules/$kernel/source" ]; then
+    echo " -> Kernel headers for $kernel not found. Installing kernel-devel..."
+    dnf install -y kernel-devel-$kernel || yum install -y kernel-devel-$kernel
+fi
+
+# 5. Process execution with visible logs (so errors aren't hidden)
+echo " -> Stopping Acronis Managed Machine Service..."
+systemctl stop acronis_mms || true
+
+echo " -> Compiling SnapAPI driver via DKMS..."
+dkms build -m snapapi26 -v "$snapapi26" -k "$kernel"
+
+echo " -> Installing the newly built driver..."
+dkms install -m snapapi26 -v "$snapapi26" -k "$kernel"
+
+echo " -> Refreshing kernel modules..."
+rmmod snapapi26 2>/dev/null || true
+modprobe snapapi26
+
+echo " -> Starting Acronis service..."
+systemctl start acronis_mms
+
+# 6. Output Verification
+echo "--------------------------------------------------"
+echo "SUCCESS: SnapAPI has been reloaded successfully!"
+echo "--------------------------------------------------"
+echo "Kernel status check:"
+lsmod | grep snapapi
+echo ""
+echo "Kindly wait a few minutes before starting any backup jobs ya..."
