@@ -9,6 +9,8 @@ BUILD_VAL=$(cat "$BUILD_FILE" 2>/dev/null | tr -d '[:space:]')
 if [ "$BUILD_VAL" != "2" ]; then
     echo "BUILD value is '$BUILD_VAL' (not 2). Running update script..."
     /usr/local/lsws/admin/misc/lsup.sh
+    echo "Curent Build"    
+    cat /usr/local/lsws/BUILD
 else
     echo "BUILD value is 2. No update required."
 fi
