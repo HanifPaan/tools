@@ -1,0 +1,377 @@
+#!/bin/bash
+# =====================================================================
+#  MAIL LOG IP CHECKER (merged)
+#  - multi-file / wildcard / rotated (.gz .bz2 .xz) logs
+#  - strict login success/fail patterns (dovecot + exim)
+#  - per-IP emails, success/failed counts, paging
+#  - geo lookup with 3 providers + automatic fallback + cooldown + cache
+#      1) ip-api.com   2) ipwho.is   3) freeipapi.com
+#  - real CSV report, random filename, auto-delete
+# =====================================================================
+
+# ---------------- SETTINGS ----------------
+SAFE_COUNTRIES="Malaysia|Singapore|United States"   # not flagged as suspicious
+PAGE_SIZE=15            # IPs per page
+GEO_TIMEOUT=4           # seconds per geo request
+GEO_MAX_FAILS=2         # consecutive failures before a provider is paused
+GEO_COOLDOWN=60         # seconds a failing provider is skipped (rate limit reset)
+FILE_TTL=1800           # seconds before the downloadable CSV is auto-deleted
+
+SUCCESS_RE='Login: user=<|Logged in:|A=dovecot_(login|plain):|=> |<= |Completed'
+FAIL_RE='auth failed|auth_failed|authenticator failed|Login aborted|Aborted login|rejected|deferred|bounced| \*\* '
+
+declare -A INFO GEO_CACHE GEO_FAILS GEO_BLOCK
+
+# ---------------- HELPERS ----------------
+count_lines() { [[ -z "$1" ]] && echo 0 || printf '%s\n' "$1" | wc -l; }
+
+jget() { # jget <json> <key1> [key2...]  -> first non-empty value
+    local json="$1" k v
+    shift
+    for k in "$@"; do
+        v=$(grep -oP "\"$k\"\s*:\s*\"\K[^\"]+" <<<"$json" | head -n1)
+        [[ -n "$v" ]] && { echo "$v"; return; }
+    done
+}
+
+is_private() {
+    [[ "$1" =~ ^(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|169\.254\.|0\.) ]]
+}
+
+stream_logs() {
+    local f
+    for f in "${LOGS[@]}"; do
+        case "$f" in
+            *.gz)  zcat  -- "$f" ;;
+            *.bz2) bzcat -- "$f" ;;
+            *.xz)  xzcat -- "$f" ;;
+            *)     cat   -- "$f" ;;
+        esac
+    done 2>/dev/null
+}
+
+# ---- geo lookup with fallback: sets CITY REGION COUNTRY ----
+geo_lookup() {
+    local ip="$1" p resp
+    CITY=""; REGION=""; COUNTRY=""
+
+    if is_private "$ip"; then
+        COUNTRY="Private/Local"; return
+    fi
+
+    if [[ -n "${GEO_CACHE[$ip]}" ]]; then
+        IFS='|' read -r CITY REGION COUNTRY <<<"${GEO_CACHE[$ip]}"
+        return
+    fi
+
+    for p in ipapi ipwhois freeipapi; do
+        # provider paused (rate limited / down)? skip it for now
+        (( SECONDS < ${GEO_BLOCK[$p]:-0} )) && continue
+
+        case "$p" in
+            ipapi)
+                resp=$(curl -s --max-time "$GEO_TIMEOUT" "http://ip-api.com/json/$ip?fields=status,country,regionName,city")
+                if [[ "$resp" == *'"status":"success"'* ]]; then
+                    CITY=$(jget "$resp" city); REGION=$(jget "$resp" regionName); COUNTRY=$(jget "$resp" country)
+                fi ;;
+            ipwhois)
+                resp=$(curl -s --max-time "$GEO_TIMEOUT" "https://ipwho.is/$ip")
+                if [[ "$resp" == *'"success":true'* ]]; then
+                    CITY=$(jget "$resp" city); REGION=$(jget "$resp" region); COUNTRY=$(jget "$resp" country)
+                fi ;;
+            freeipapi)
+                resp=$(curl -s --max-time "$GEO_TIMEOUT" "https://freeipapi.com/api/json/$ip")
+                CITY=$(jget "$resp" cityName city); REGION=$(jget "$resp" regionName region); COUNTRY=$(jget "$resp" countryName country)
+                ;;
+        esac
+
+        if [[ -n "$COUNTRY" ]]; then
+            GEO_FAILS[$p]=0
+            GEO_CACHE[$ip]="$CITY|$REGION|$COUNTRY"
+            return
+        fi
+
+        # failed -> count it, pause provider after too many failures
+        GEO_FAILS[$p]=$(( ${GEO_FAILS[$p]:-0} + 1 ))
+        if (( GEO_FAILS[$p] >= GEO_MAX_FAILS )); then
+            GEO_BLOCK[$p]=$(( SECONDS + GEO_COOLDOWN ))
+            GEO_FAILS[$p]=0
+        fi
+    done
+    # all providers failed -> stays empty (not cached, retried later)
+}
+
+# ---- per-IP stats (cached in INFO) ----
+build_info() {
+    local ip="$1" esc ip_re ip_data s f users
+    [[ -n "${INFO[$ip]}" ]] && return
+
+    esc="${ip//./[.]}"
+    ip_re="(rip=|\[)${esc}([^0-9.]|\$)"
+    ip_data=$(grep -E "$ip_re" <<<"$DATA")
+
+    s=$(grep -E "$SUCCESS_RE" <<<"$ip_data" | grep -vcE "$FAIL_RE")
+    f=$(grep -cE "$FAIL_RE" <<<"$ip_data")
+
+    users=$(grep -oP 'A=dovecot_(login|plain):\K[^ ,]+|user=<\K[^>]+|(imap|pop3)\(\K[^)]+' <<<"$ip_data" \
+        | grep -viE 'localhost|localdomain|^root(@|$)' | sort -u | paste -sd, -)
+    [[ -z "$users" ]] && users="none"
+
+    geo_lookup "$ip"
+    INFO[$ip]="$s|$f|$users|${CITY:-Unknown}|${REGION:-Unknown}|${COUNTRY:-Unknown}"
+}
+
+print_ip() {
+    local ip="$1" count="$2" s f users city region country flag=""
+    build_info "$ip"
+    IFS='|' read -r s f users city region country <<<"${INFO[$ip]}"
+
+    if [[ "$country" != "Unknown" && "$country" != "Private/Local" ]] && ! [[ "$country" =~ ^($SAFE_COUNTRIES)$ ]]; then
+        flag="(SUSPICIOUS)"
+    fi
+    (( f >= 10 && s == 0 )) && flag="$flag (BRUTE-FORCE?)"
+
+    echo ""
+    echo "$ip $flag"
+    echo "┌──────────────────────────────────────┐"
+    echo "Users: $users" | fold -s -w 36 | sed 's/^/│ /'
+    echo "└──────────────────────────────────────┘"
+    echo "    hits     : $count"
+    echo "    success  : $s"
+    echo "    failed   : $f"
+    echo "    city     : $city"
+    echo "    region   : $region"
+    echo "    country  : $country"
+}
+
+# =====================================================================
+echo "======================================"
+echo "      MAIL LOG IP CHECKER"
+echo "======================================"
+echo ""
+echo "Maillog files:"
+ls -1 /var/log/maillog* 2>/dev/null
+echo ""
+echo "Enter log file path/pattern (e.g. /var/log/maillog or /var/log/maillog*) [default /var/log/maillog]:"
+read -r LOGPATTERN </dev/tty
+[[ -z "$LOGPATTERN" ]] && LOGPATTERN="/var/log/maillog"
+
+shopt -s nullglob
+LOGS=()
+for f in $LOGPATTERN; do   # unquoted on purpose: expands wildcards / multiple paths
+    [[ -f "$f" ]] && LOGS+=("$f")
+done
+shopt -u nullglob
+
+if [[ ${#LOGS[@]} -eq 0 ]]; then
+    echo "❌ Log file not found matching: $LOGPATTERN"
+    exit 1
+fi
+echo "Using ${#LOGS[@]} log file(s):"
+printf '   %s\n' "${LOGS[@]}"
+
+# ---------------- SEARCH LOOP ----------------
+while true; do
+    echo ""
+    echo "Enter email / domain / IP:"
+    read -r SEARCH </dev/tty
+    if [[ -z "$SEARCH" ]]; then
+        echo "❌ empty input"
+        continue
+    fi
+
+    echo ""
+    echo "Enter date (e.g. Oct 14 or 2026-10-14) or ENTER for ALL:"
+    read -r DATE </dev/tty
+    # syslog pads single-digit days with 2 spaces: "Oct  4"
+    if [[ "$DATE" =~ ^([A-Za-z]{3})[[:space:]]+([0-9])$ ]]; then
+        DATE="${BASH_REMATCH[1]}  ${BASH_REMATCH[2]}"
+    fi
+
+    echo ""
+    echo "Processing..."
+
+    if [[ -n "$DATE" ]]; then
+        DATA=$(stream_logs | grep -F -- "$DATE" | grep -F -- "$SEARCH")
+    else
+        DATA=$(stream_logs | grep -F -- "$SEARCH")
+    fi
+
+    [[ -n "$DATA" ]] && break
+
+    echo ""
+    echo "❌ NO DATA FOUND"
+    echo "1) Try again"
+    echo "2) Exit"
+    read -r CH </dev/tty
+    [[ "$CH" != "1" ]] && echo "👋 Exit" && exit 0
+done
+
+# ---------------- STATUS FILTER ----------------
+SUCCESS_LINES=$(grep -E "$SUCCESS_RE" <<<"$DATA" | grep -vE "$FAIL_RE")
+FAILED_LINES=$(grep -E "$FAIL_RE" <<<"$DATA")
+
+# ---------------- SUMMARY ----------------
+echo ""
+echo "======================================"
+echo "SUMMARY"
+echo "======================================"
+echo "Total lines   : $(count_lines "$DATA")"
+echo "Success lines : $(count_lines "$SUCCESS_LINES")"
+echo "Failed lines  : $(count_lines "$FAILED_LINES")"
+
+IMAP_COUNT=$(grep -c "imap" <<<"$SUCCESS_LINES")
+POP3_COUNT=$(grep -c "pop3" <<<"$SUCCESS_LINES")
+SMTP_COUNT=$(grep -cE "A=dovecot_(login|plain)" <<<"$SUCCESS_LINES")
+echo ""
+echo "Detected service (successful lines):"
+(( IMAP_COUNT > 0 )) && echo "   IMAP : $IMAP_COUNT"
+(( POP3_COUNT > 0 )) && echo "   POP3 : $POP3_COUNT"
+(( SMTP_COUNT > 0 )) && echo "   SMTP AUTH : $SMTP_COUNT"
+
+if [[ -n "$FAILED_LINES" ]]; then
+    echo ""
+    echo "⚠️  Last failed logs:"
+    echo "--------------------------------------"
+    echo "$FAILED_LINES" | tail -5
+    echo "--------------------------------------"
+fi
+
+# ---------------- IP ANALYSIS ----------------
+echo ""
+echo "======================================"
+echo "IP ANALYSIS"
+echo "======================================"
+
+mapfile -t IP_ROWS < <(
+    grep -oP 'rip=\K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+|(?<=\[)[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(?=\])' <<<"$DATA" \
+    | sort | uniq -c | sort -nr
+)
+TOTAL_IPS=${#IP_ROWS[@]}
+
+if (( TOTAL_IPS == 0 )); then
+    echo "No IP addresses found in the matched lines."
+else
+    echo "Found $TOTAL_IPS unique IP(s). (geo: ip-api -> ipwho.is -> freeipapi fallback)"
+    PAGE=$PAGE_SIZE
+    OFFSET=0
+    while (( OFFSET < TOTAL_IPS )); do
+        END=$(( OFFSET + PAGE ))
+        (( END > TOTAL_IPS )) && END=$TOTAL_IPS
+
+        for (( i=OFFSET; i<END; i++ )); do
+            read -r count ip <<<"${IP_ROWS[$i]}"
+            [[ -z "$ip" ]] && continue
+            print_ip "$ip" "$count"
+        done
+        OFFSET=$END
+
+        (( OFFSET >= TOTAL_IPS )) && break
+
+        echo ""
+        echo "--------------------------------------"
+        echo "Showing $OFFSET of $TOTAL_IPS IPs."
+        echo "1) Show next $PAGE_SIZE IPs"
+        echo "2) Show ALL remaining IPs"
+        echo "3) Proceed to download / finish"
+        read -r CHOICE </dev/tty
+        case "$CHOICE" in
+            2) PAGE=$TOTAL_IPS ;;
+            3) break ;;
+            *) PAGE=$PAGE_SIZE ;;
+        esac
+    done
+fi
+
+# ---------------- DOWNLOAD OPTION ----------------
+echo ""
+echo "--------------------------------------"
+echo "Do you want to generate download file? (y/N)"
+read -r DL </dev/tty
+DL="${DL:-n}"
+
+if [[ "$DL" == "y" || "$DL" == "Y" ]] && (( TOTAL_IPS > 0 )); then
+
+    # --- find target domain ---
+    if [[ "$SEARCH" == *@* ]]; then
+        TARGET_DOMAIN="${SEARCH#*@}"
+    elif [[ "$SEARCH" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        TARGET_DOMAIN=$(grep -oE '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+' <<<"$DATA" | head -n1 | cut -d@ -f2)
+    else
+        TARGET_DOMAIN="$SEARCH"
+    fi
+
+    # --- find cPanel owner ---
+    HOST_USER=$(/scripts/whoowns "$TARGET_DOMAIN" 2>/dev/null | tr -d '[:space:]')
+    if [[ -z "$HOST_USER" ]]; then
+        HOST_USER=$(grep -lE "^DNS[0-9]*=${TARGET_DOMAIN}$" /var/cpanel/users/* 2>/dev/null | head -n1 | xargs -r basename)
+    fi
+
+    MAIN_DOMAIN=""
+    [[ -n "$HOST_USER" ]] && MAIN_DOMAIN=$(grep -i "^DNS=" "/var/cpanel/users/$HOST_USER" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+    [[ -z "$MAIN_DOMAIN" ]] && MAIN_DOMAIN="$TARGET_DOMAIN"
+
+    # --- pick a domain that actually answers ---
+    FINAL_DOMAIN="$MAIN_DOMAIN"
+    if [[ -n "$TARGET_DOMAIN" ]]; then
+        HTTP_CODE=$(curl -sL -o /dev/null -w "%{http_code}" --max-time 3 "https://$TARGET_DOMAIN")
+        if [[ "$HTTP_CODE" == "200" ]]; then
+            FINAL_DOMAIN="$TARGET_DOMAIN"
+        else
+            echo "🔎 $TARGET_DOMAIN returned HTTP ${HTTP_CODE:-000}. Falling back to: $MAIN_DOMAIN"
+        fi
+    fi
+
+    # --- random filename so the URL cannot be guessed ---
+    TOKEN=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    FNAME="mail_login_report_${TOKEN}.csv"
+
+    if [[ -n "$HOST_USER" && -d "/home/$HOST_USER/public_html" ]]; then
+        TMP_FILE="/home/$HOST_USER/public_html/$FNAME"
+        DOWNLOAD_URL="https://$FINAL_DOMAIN/$FNAME"
+    else
+        TMP_FILE="/root/$FNAME"
+        DOWNLOAD_URL=""
+        echo "⚠️  Could not find a public_html for the account, saving to /root instead."
+    fi
+
+    echo "Building report (geo lookups are cached)..."
+    {
+        echo "ip,hits,success,failed,emails,city,region,country,flag"
+        for row in "${IP_ROWS[@]}"; do
+            read -r count ip <<<"$row"
+            [[ -z "$ip" ]] && continue
+            build_info "$ip"
+            IFS='|' read -r s f users city region country <<<"${INFO[$ip]}"
+            flag=""
+            if [[ "$country" != "Unknown" && "$country" != "Private/Local" ]] && ! [[ "$country" =~ ^($SAFE_COUNTRIES)$ ]]; then
+                flag="SUSPICIOUS"
+            fi
+            (( f >= 10 && s == 0 )) && flag="${flag:+$flag }BRUTE-FORCE?"
+            users="${users//,/;}"   # keep CSV columns intact
+            printf '"%s",%s,%s,%s,"%s","%s","%s","%s","%s"\n' \
+                "$ip" "$count" "$s" "$f" "$users" "$city" "$region" "$country" "$flag"
+        done
+    } > "$TMP_FILE"
+
+    chmod 640 "$TMP_FILE"
+    if [[ -n "$HOST_USER" && "$TMP_FILE" == /home/* ]]; then
+        chown "$HOST_USER":"$HOST_USER" "$TMP_FILE" 2>/dev/null
+        chmod 644 "$TMP_FILE"     # web server must be able to read it
+        # auto-delete after FILE_TTL seconds
+        nohup bash -c "sleep $FILE_TTL; rm -f '$TMP_FILE'" >/dev/null 2>&1 &
+        disown
+    fi
+
+    echo ""
+    if [[ -n "$DOWNLOAD_URL" ]]; then
+        echo "📄 DOWNLOAD LINK (auto-deleted in $((FILE_TTL/60)) min):"
+        echo "$DOWNLOAD_URL"
+        echo ""
+    fi
+    echo "📁 FILE:"
+    echo "$TMP_FILE"
+fi
+
+echo ""
+echo "Done"
