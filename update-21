@@ -7,7 +7,7 @@ echo "$OUTPUT"
 echo
 
 if echo "$OUTPUT" | grep -q "Transaction Summary"; then
-    echo "RESULT: CAN UPDATE (updates available)"
+    echo "Result: Ok"
     echo
     echo "Checking storage..."
     df -h /
