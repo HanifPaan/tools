@@ -7,7 +7,7 @@ echo "$OUTPUT"
 echo
 
 if echo "$OUTPUT" | grep -q "Transaction Summary"; then
-    echo "Result: Ok"
+    echo "=====| Result: Ok |====="
     echo
     echo "Checking storage..."
     df -h /
@@ -16,20 +16,20 @@ if echo "$OUTPUT" | grep -q "Transaction Summary"; then
     AVAIL_GB=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
 
     if [ "$AVAIL_GB" -gt "$MIN_GB" ]; then
-        echo "STORAGE ENOUGH (${AVAIL_GB}G free, need more than ${MIN_GB}G) - can update"
+        echo "=====| STORAGE ENOUGH (${AVAIL_GB}G free, need more than ${MIN_GB}G) - can update |====="
         echo
         echo "Hostname:"
         hostname
         echo
     else
-        echo "STORAGE NOT ENOUGH (${AVAIL_GB}G free, need more than ${MIN_GB}G) - cannot update"
+        echo "=====| STORAGE NOT ENOUGH (${AVAIL_GB}G free, need more than ${MIN_GB}G) - cannot update |====="
         echo
         echo "Hostname:"
         hostname
         echo
     fi
 else
-    echo "RESULT: CANNOT UPDATE (no updates available / nothing to do)"
+    echo "=====| RESULT: CANNOT UPDATE (no updates available / nothing to do) |====="
 fi
 
 exit 0
