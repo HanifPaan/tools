@@ -49,3 +49,7 @@ chmod +x /root/check_acronis_userdata.sh
 echo "--- installed ---"
 ls -l /root/check_acronis_userdata.sh
 crontab -l | grep check_acronis
+
+echo "Scan Running..."
+bash /root/check_acronis_userdata.sh
+echo "Log saved at /var/log/check_acronis_userdata.log "
