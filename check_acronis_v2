@@ -1,0 +1,51 @@
+cat > /root/check_acronis_userdata.sh <<'SCRIPT_END'
+#!/bin/bash
+# Checks cPanel's /etc/userdatadomains for any domain whose path points
+# into /mnt/acronis (stale Acronis mounts picked up by cPanel).
+# Sends an email alert via the mamam.my hub if any are found.
+# Recipients are managed on the hub (cPanel forwarders for alerts@mamam.my).
+
+ALERT_EMAIL="alerts@mamam.my"
+FROM_EMAIL="alert@azlantheninja.my"
+FILE="/etc/userdatadomains"
+PATTERN="/mnt/acronis"
+HOST=$(hostname -f)
+LOG="/var/log/check_acronis_userdata.log"
+
+if [ ! -r "$FILE" ]; then
+    echo "$(date '+%F %T') ERROR: cannot read $FILE" >> "$LOG"
+    exit 1
+fi
+
+MATCHES=$(grep -i "$PATTERN" "$FILE")
+
+if [ -n "$MATCHES" ]; then
+    COUNT=$(echo "$MATCHES" | wc -l)
+    echo "$(date '+%F %T') FOUND $COUNT match(es), sending alert to $ALERT_EMAIL" >> "$LOG"
+
+    /usr/sbin/sendmail -t -f "$FROM_EMAIL" <<EOF
+To: $ALERT_EMAIL
+From: Acronis Monitor <$FROM_EMAIL>
+Subject: [ALERT] $HOST - $COUNT domain(s) pointing to $PATTERN
+
+Server: $HOST
+Time:   $(date '+%F %T %Z')
+File:   $FILE
+
+The following entries contain "$PATTERN":
+
+$MATCHES
+EOF
+else
+    echo "$(date '+%F %T') OK, no matches" >> "$LOG"
+fi
+SCRIPT_END
+
+chmod +x /root/check_acronis_userdata.sh
+
+( crontab -l 2>/dev/null | grep -qF '/root/check_acronis_userdata.sh' ) || \
+( crontab -l 2>/dev/null; echo '0 */6 * * * /root/check_acronis_userdata.sh >/dev/null 2>&1' ) | crontab -
+
+echo "--- installed ---"
+ls -l /root/check_acronis_userdata.sh
+crontab -l | grep check_acronis
