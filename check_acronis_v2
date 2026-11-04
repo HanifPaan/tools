@@ -6,7 +6,7 @@ cat > /root/check_acronis_userdata.sh <<'SCRIPT_END'
 # Recipients are managed on the hub (cPanel forwarders for alerts@mamam.my).
 
 ALERT_EMAIL="alerts@mamam.my"
-FROM_EMAIL="alert@azlantheninja.my"
+FROM_EMAIL="alerts@mamam.my"
 FILE="/etc/userdatadomains"
 PATTERN="/mnt/acronis"
 HOST=$(hostname -f)
