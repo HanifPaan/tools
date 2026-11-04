@@ -27,6 +27,9 @@ if [ -n "$MATCHES" ]; then
 To: $ALERT_EMAIL
 From: Acronis Monitor <$FROM_EMAIL>
 Subject: [ALERT] $HOST - $COUNT domain(s) pointing to $PATTERN
+Auto-Submitted: auto-generated
+
+*** This is an automated alert. Please do not reply to this email. ***
 
 Server: $HOST
 Time:   $(date '+%F %T %Z')
@@ -35,6 +38,10 @@ File:   $FILE
 The following entries contain "$PATTERN":
 
 $MATCHES
+
+--
+Acronis Monitor (automated)
+This mailbox is not monitored. Replies will not be read.
 EOF
 else
     echo "$(date '+%F %T') OK, no matches" >> "$LOG"
@@ -52,4 +59,5 @@ crontab -l | grep check_acronis
 
 echo "Scan Running..."
 bash /root/check_acronis_userdata.sh
-echo "Log saved at /var/log/check_acronis_userdata.log "
+tail -n 1 /var/log/check_acronis_userdata.log
+echo "Log saved at /var/log/check_acronis_userdata.log"
