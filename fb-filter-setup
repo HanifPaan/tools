@@ -1,0 +1,186 @@
+#!/bin/bash
+
+PLUGIN_NAME="Facebook-Request-Throttle-WordPress-Plugin"
+ZIP_URL="https://github.com/nadimtuhin/Facebook-Request-Throttle-WordPress-Plugin/archive/refs/heads/main.zip"
+ZIP_FILE="main.zip"
+
+echo "Facebook Request Throttle Installer"
+echo
+
+CURRENT_DIR=$(pwd)
+PLUGIN_PATH="$CURRENT_DIR/wp-content/plugins"
+
+echo "Current directory:"
+echo "$CURRENT_DIR"
+echo
+
+echo "Plugin installation path:"
+echo "$PLUGIN_PATH"
+echo
+
+echo "Checking WordPress installation..."
+
+if [ ! -f "wp-config.php" ]; then
+    echo "FAILED"
+    echo
+    echo "Reason:"
+    echo "wp-config.php not found."
+    echo "Please run this script from your WordPress document root."
+    exit 1
+fi
+
+echo "Found: wp-config.php"
+echo
+
+echo "Checking WordPress status..."
+
+WP_CHECK=$(wp core is-installed --allow-root 2>&1)
+
+if [ $? -ne 0 ]; then
+    echo "FAILED"
+    echo
+    echo "Reason:"
+    echo "$WP_CHECK"
+    exit 1
+fi
+
+echo "Success: WordPress detected."
+echo
+
+echo "Checking PHP version..."
+
+PHP_VERSION=$(php -r 'echo PHP_VERSION;')
+PHP_MAJOR=$(echo "$PHP_VERSION" | cut -d. -f1)
+PHP_MINOR=$(echo "$PHP_VERSION" | cut -d. -f2)
+
+if [ "$PHP_MAJOR" -lt 7 ] || { [ "$PHP_MAJOR" -eq 7 ] && [ "$PHP_MINOR" -lt 4 ]; }; then
+    echo "FAILED"
+    echo
+    echo "Reason:"
+    echo "Your server PHP version $PHP_VERSION is not supported."
+    echo "WordPress requires PHP 7.4 or higher."
+    exit 1
+fi
+
+echo "PHP $PHP_VERSION OK."
+echo
+
+mkdir -p "$PLUGIN_PATH"
+
+echo -n "[1/5] Downloading plugin... "
+
+wget -q "$ZIP_URL" -O "$ZIP_FILE"
+
+if [ $? -ne 0 ]; then
+    echo "FAILED"
+    echo "Reason: Unable to download plugin archive."
+    exit 1
+fi
+
+echo "OK"
+
+echo -n "[2/5] Extracting archive... "
+
+unzip -oq "$ZIP_FILE"
+
+if [ $? -ne 0 ]; then
+    echo "FAILED"
+    echo "Reason: Unable to extract plugin archive."
+    exit 1
+fi
+
+echo "OK"
+
+echo -n "[3/5] Installing plugin to wp-content/plugins... "
+
+rm -rf "$PLUGIN_PATH/$PLUGIN_NAME"
+
+mv "$PLUGIN_NAME-main" "$PLUGIN_PATH/$PLUGIN_NAME"
+
+if [ $? -ne 0 ]; then
+    echo "FAILED"
+    echo "Reason: Unable to move plugin into wp-content/plugins."
+    exit 1
+fi
+
+echo "OK"
+
+OWNER=$(stat -c "%U:%G" wp-config.php)
+
+echo -n "[4/5] Setting ownership $OWNER... "
+
+chown -R "$OWNER" "$PLUGIN_PATH/$PLUGIN_NAME"
+
+if [ $? -ne 0 ]; then
+    echo "FAILED"
+    echo "Reason: Unable to change ownership."
+    exit 1
+fi
+
+echo "OK"
+
+echo
+echo "[5/5] Activating plugin..."
+echo
+
+activate_plugin()
+{
+    php -d memory_limit="$1" /usr/local/bin/wp plugin activate "$PLUGIN_NAME" --allow-root 2>&1
+}
+
+OUTPUT=$(activate_plugin "128M")
+STATUS=$?
+
+if [ $STATUS -eq 0 ]; then
+    echo "$OUTPUT"
+    echo
+    echo "Done."
+    rm -f "$ZIP_FILE"
+    exit 0
+fi
+
+if echo "$OUTPUT" | grep -qiE "Allowed memory size|memory exhausted|out of memory"; then
+
+    echo "Memory limit reached."
+    echo "Retrying with memory_limit=1GB..."
+    echo
+
+    OUTPUT=$(activate_plugin "1G")
+    STATUS=$?
+
+    if [ $STATUS -eq 0 ]; then
+        echo "$OUTPUT"
+        echo
+        echo "Done."
+        rm -f "$ZIP_FILE"
+        exit 0
+    fi
+
+    if echo "$OUTPUT" | grep -qiE "Allowed memory size|memory exhausted|out of memory"; then
+
+        echo "1GB memory limit failed."
+        echo "Retrying with memory_limit=2GB..."
+        echo
+
+        OUTPUT=$(activate_plugin "2G")
+        STATUS=$?
+
+        if [ $STATUS -eq 0 ]; then
+            echo "$OUTPUT"
+            echo
+            echo "Done."
+            rm -f "$ZIP_FILE"
+            exit 0
+        fi
+    fi
+fi
+
+echo
+echo "Plugin activation failed."
+echo
+echo "Reason:"
+echo "$OUTPUT"
+
+rm -f "$ZIP_FILE"
+
+exit 1
