@@ -1,0 +1,30 @@
+#!/bin/bash
+# LiteSpeed Enterprise upgrade from GitHub release (no download from litespeedtech.com)
+set -e
+
+VER="6.3.7"
+TAG="lsws-6.3.7-b9"
+SHA="bebf0feed27e08c4bdebf6e5fdd39d385ef3d314305d0e530c1100f11a8a7bf3"
+FILE="lsws-$VER-ent-x86_64-linux.tar.gz"
+URL="https://github.com/HanifPaan/tools/releases/download/$TAG/$FILE"
+
+cd /usr/local/lsws/autoupdate/
+
+echo "==> Current version:"
+/usr/local/lsws/bin/lshttpd -v || true
+
+echo "==> Downloading $FILE ..."
+wget -q --show-progress -O "$FILE" "$URL"
+
+echo "==> Verifying checksum ..."
+echo "$SHA  $FILE" | sha256sum -c - || { echo "CHECKSUM FAILED - aborting"; rm -f "$FILE"; exit 1; }
+
+echo "==> Backing up config ..."
+cp -a /usr/local/lsws/conf "/root/lsws-conf-backup-$(date +%F-%H%M)"
+
+echo "==> Upgrading to $VER ..."
+/usr/local/lsws/admin/misc/update.sh "$VER" ent x86_64-linux
+
+echo "==> New version:"
+/usr/local/lsws/bin/lshttpd -v
+systemctl is-active lsws && echo "==> DONE, LSWS running."
