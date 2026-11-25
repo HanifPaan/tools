@@ -8,10 +8,30 @@ SHA="adfe47ee71aeda4ea845c30ec2e2f084c36777f7c88860c7acbf0660672847f6"
 FILE="lsws-$VER-ent-x86_64-linux.tar.gz"
 URL="https://github.com/HanifPaan/tools/releases/download/$TAG/$FILE"
 
+# Show what is listening on a port: LiteSpeed / Nginx / Apache / nothing
+port_owner() {
+  local p=$1 lines procs protos name
+  lines=$(ss -tulpnH 2>/dev/null | awk -v p=":$p" '$5 ~ p"$" {print $1, $NF}')
+  if [ -z "$lines" ]; then
+    printf "  Port %-4s: NOTHING listening\n" "$p"
+    return
+  fi
+  procs=$(echo "$lines" | grep -o '(("[^"]*"' | cut -d'"' -f2 | sort -u | paste -sd, -)
+  protos=$(echo "$lines" | awk '{print $1}' | sort -u | paste -sd, -)
+  case "$procs" in
+    *litespeed*|*lshttpd*) name="LiteSpeed" ;;
+    *nginx*)               name="Nginx" ;;
+    *httpd*|*apache*)      name="Apache" ;;
+    *)                     name="Other" ;;
+  esac
+  printf "  Port %-4s: %-9s (process: %s) [%s]\n" "$p" "$name" "$procs" "$protos"
+}
+
 cd /usr/local/lsws/autoupdate/
 
-echo "==> Current version:"
-/usr/local/lsws/bin/lshttpd -v || true
+echo "==> Version BEFORE:"
+BEFORE=$(/usr/local/lsws/bin/lshttpd -v 2>&1 || true)
+echo "  $BEFORE"
 
 echo "==> Downloading $FILE ..."
 wget -q --show-progress -O "$FILE" "$URL"
@@ -25,7 +45,18 @@ cp -a /usr/local/lsws/conf "/root/lsws-conf-backup-$(date +%F-%H%M)"
 echo "==> Upgrading to $VER ..."
 /usr/local/lsws/admin/misc/update.sh "$VER" ent x86_64-linux
 
-echo "==> New version:"
-/usr/local/lsws/bin/lshttpd -v
-systemctl is-active lsws && echo "==> DONE, LSWS running."
-echo "==> Boot enabled: $(systemctl is-enabled lshttpd 2>&1)"
+sleep 3   # give LSWS time to bind ports after restart
+
+AFTER=$(/usr/local/lsws/bin/lshttpd -v 2>&1 || true)
+
+echo
+echo "================ SUMMARY ================"
+echo "  Before : $BEFORE"
+echo "  After  : $AFTER"
+echo "  Server IP: $(hostname -I)"
+echo "  LSWS service : $(systemctl is-active lsws 2>&1)"
+echo "  Boot enabled : $(systemctl is-enabled lshttpd 2>&1)"
+echo "  Web ports:"
+port_owner 80
+port_owner 443
+echo "========================================="
