@@ -34,6 +34,7 @@ summary() {
   echo "  Result : $1"
   echo "  Before : ${BEFORE:-unknown}"
   echo "  After  : $($LSHTTPD -v 2>&1 || true)"
+  echo "  Hostname : $(hostname)"
   echo "  Server IP: $(hostname -I)"
   echo "  LSWS service : $(systemctl is-active lsws 2>&1 || true)"
   echo "  Boot enabled : $(systemctl is-enabled lshttpd 2>&1 || true)"
