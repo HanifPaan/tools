@@ -1,4 +1,4 @@
-]#!/bin/bash
+#!/bin/bash
 # LiteSpeed Enterprise upgrade from GitHub release (no download from litespeedtech.com)
 set -e
 
